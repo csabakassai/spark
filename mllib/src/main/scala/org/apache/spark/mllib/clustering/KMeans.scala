@@ -17,13 +17,14 @@
 
 package org.apache.spark.mllib.clustering
 
+import org.apache.spark.broadcast.Broadcast
+
 import scala.collection.mutable.ArrayBuffer
 
-import org.apache.spark.Logging
+import org.apache.spark.{Accumulator, Logging}
 import org.apache.spark.annotation.{Experimental, Since}
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
 import org.apache.spark.mllib.linalg.BLAS.{axpy, scal}
-import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.util.Utils
@@ -39,13 +40,13 @@ import org.apache.spark.util.random.XORShiftRandom
  */
 @Since("0.8.0")
 class KMeans private (
-    private var k: Int,
-    private var maxIterations: Int,
-    private var runs: Int,
-    private var initializationMode: String,
-    private var initializationSteps: Int,
-    private var epsilon: Double,
-    private var seed: Long) extends Serializable with Logging {
+    private[clustering] var k: Int,
+    private[clustering] var maxIterations: Int,
+    private[clustering] var runs: Int,
+    private[clustering] var initializationMode: String,
+    private[clustering] var initializationSteps: Int,
+    private[clustering] var epsilon: Double,
+    private[clustering] var seed: Long) extends Serializable with Logging {
 
   /**
    * Constructs a KMeans instance with default parameters: {k: 2, maxIterations: 20, runs: 1,
@@ -221,6 +222,35 @@ class KMeans private (
     model
   }
 
+  def calculateClustersInPartitions(data: RDD[VectorWithNorm], bcActiveCenters: Broadcast[Array[Array[VectorWithNorm]]], costAccums: ArrayBuffer[Accumulator[Double]]) : RDD[((Int, Int), (Vector, Long))] = {
+
+    data.mapPartitions { points =>
+      val thisActiveCenters = bcActiveCenters.value
+      val runs = thisActiveCenters.length
+      val k = thisActiveCenters(0).length
+      val dims = thisActiveCenters(0)(0).vector.size
+
+      val sums = Array.fill(runs, k)(Vectors.zeros(dims))
+      val counts = Array.fill(runs, k)(0L)
+
+      points.foreach { point =>
+        (0 until runs).foreach { i =>
+          val (bestCenter, cost) = KMeans.findClosest(thisActiveCenters(i), point)
+          costAccums(i) += cost
+          val sum = sums(i)(bestCenter)
+          axpy(1.0, point.vector, sum)
+          counts(i)(bestCenter) += 1
+        }
+      }
+
+      val contribs = for (i <- 0 until runs; j <- 0 until k) yield {
+        ((i, j), (sums(i)(j), counts(i)(j)))
+      }
+      contribs.iterator
+    }
+
+  }
+
   /**
    * Implementation of K-Means algorithm.
    */
@@ -275,31 +305,12 @@ class KMeans private (
 
       val bcActiveCenters = sc.broadcast(activeCenters)
 
+      val partitions: RDD[((Int, Int), (Vector, Long))] = calculateClustersInPartitions(data, bcActiveCenters, costAccums)
       // Find the sum and count of points mapping to each center
-      val totalContribs = data.mapPartitions { points =>
-        val thisActiveCenters = bcActiveCenters.value
-        val runs = thisActiveCenters.length
-        val k = thisActiveCenters(0).length
-        val dims = thisActiveCenters(0)(0).vector.size
+      val totalContribs = partitions.reduceByKey(mergeContribs).collectAsMap()
 
-        val sums = Array.fill(runs, k)(Vectors.zeros(dims))
-        val counts = Array.fill(runs, k)(0L)
 
-        points.foreach { point =>
-          (0 until runs).foreach { i =>
-            val (bestCenter, cost) = KMeans.findClosest(thisActiveCenters(i), point)
-            costAccums(i) += cost
-            val sum = sums(i)(bestCenter)
-            axpy(1.0, point.vector, sum)
-            counts(i)(bestCenter) += 1
-          }
-        }
 
-        val contribs = for (i <- 0 until runs; j <- 0 until k) yield {
-          ((i, j), (sums(i)(j), counts(i)(j)))
-        }
-        contribs.iterator
-      }.reduceByKey(mergeContribs).collectAsMap()
 
       // Update the cluster centers and costs for each active run
       for ((run, i) <- activeRuns.zipWithIndex) {
@@ -310,7 +321,7 @@ class KMeans private (
           if (count != 0) {
             scal(1.0 / count, sum)
             val newCenter = new VectorWithNorm(sum)
-            if (KMeans.fastSquaredDistance(newCenter, centers(run)(j)) > epsilon * epsilon) {
+            if (KMeansUtil.fastSquaredDistance(newCenter, centers(run)(j)) > epsilon * epsilon) {
               changed = true
             }
             centers(run)(j) = newCenter
@@ -558,7 +569,7 @@ object KMeans {
       var lowerBoundOfSqDist = center.norm - point.norm
       lowerBoundOfSqDist = lowerBoundOfSqDist * lowerBoundOfSqDist
       if (lowerBoundOfSqDist < bestDistance) {
-        val distance: Double = fastSquaredDistance(center, point)
+        val distance: Double = KMeansUtil.fastSquaredDistance(center, point)
         if (distance < bestDistance) {
           bestDistance = distance
           bestIndex = i
@@ -577,15 +588,7 @@ object KMeans {
       point: VectorWithNorm): Double =
     findClosest(centers, point)._2
 
-  /**
-   * Returns the squared Euclidean distance between two vectors computed by
-   * [[org.apache.spark.mllib.util.MLUtils#fastSquaredDistance]].
-   */
-  private[clustering] def fastSquaredDistance(
-      v1: VectorWithNorm,
-      v2: VectorWithNorm): Double = {
-    MLUtils.fastSquaredDistance(v1.vector, v1.norm, v2.vector, v2.norm)
-  }
+
 
   private[spark] def validateInitMode(initMode: String): Boolean = {
     initMode match {
@@ -602,7 +605,7 @@ object KMeans {
  * @see [[org.apache.spark.mllib.clustering.KMeans#fastSquaredDistance]]
  */
 private[clustering]
-class VectorWithNorm(val vector: Vector, val norm: Double) extends Serializable {
+case class VectorWithNorm(val vector: Vector, val norm: Double) extends Serializable {
 
   def this(vector: Vector) = this(vector, Vectors.norm(vector, 2.0))
 
@@ -610,4 +613,10 @@ class VectorWithNorm(val vector: Vector, val norm: Double) extends Serializable 
 
   /** Converts the vector to a dense vector. */
   def toDense: VectorWithNorm = new VectorWithNorm(Vectors.dense(vector.toArray), norm)
+
+
+}
+
+object VectorWithNorm {
+  def fromCoordinates(coordinates: Double*): VectorWithNorm = new VectorWithNorm(coordinates.toArray)
 }
