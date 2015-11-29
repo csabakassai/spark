@@ -15,7 +15,7 @@ object PCKMeansInitializator extends Logging {
   type ComponentId = Long
 
 
-  def preProcessData (data : RDD[Vector], mustLinkConstraints: Set[Constraint], cannotLinkConstraints: Set[Constraint]): ( RDD[VectorWithNorm], Map[VectorWithNorm, ComponentId], Map[ComponentId, Seq[VectorWithNorm]], Map[ComponentId, Set[ComponentId]], Map[Long, VectorWithNorm])  = {
+  def preProcessData (data : RDD[Vector], mustLinkConstraints: Set[Constraint], cannotLinkConstraints: Set[Constraint]): ( RDD[VectorWithNorm], Map[VectorWithNorm, ComponentId], Map[ComponentId, Seq[VectorWithNorm]], Map[ComponentId, Set[ComponentId]])  = {
 
     logTrace(s"""Mustlink constrains: ${mustLinkConstraints.mkString("\n")}""")
     logTrace(s"""Cannotlink constraints: ${cannotLinkConstraints.mkString("\n")}""")
@@ -28,16 +28,16 @@ object PCKMeansInitializator extends Logging {
 
     val normalizedData : RDD[VectorWithNorm] = data.map( new VectorWithNorm(_))
 
-    val filteredData: RDD[VectorWithNorm] = filterContrainedElementsFromData( normalizedData, mustLinkConstraintVectorSet, cannotLinkConstraintVectorSet )
+    val filteredData: RDD[VectorWithNorm] = filterConstrainedElementsFromData( normalizedData, mustLinkConstraintVectorSet, cannotLinkConstraintVectorSet )
 
-    val (vectorVertexMap, vertexIdToVectorMap) = indexConstrainedVectors( mustLinkConstraintVectorSet, cannotLinkConstraintVectorSet )
+    val (elemToVertexIdMap, vertexIdToElemMap) = indexConstrainedVectors( mustLinkConstraintVectorSet, cannotLinkConstraintVectorSet )
 
-    val (vectorComponentMap, elementsByComponents) = calculateMustLinkComponents( mustLinkConstraints, vectorVertexMap, vertexIdToVectorMap )(data.context)
+    val (elemToComponentIdMap, elementsByComponents) = calculateMustLinkComponents( mustLinkConstraints, elemToVertexIdMap, vertexIdToElemMap )(data.context)
 
-    val cannotLinkComponentMap = calculateComponentLevelCannotLinks(cannotLinkConstraints, vectorComponentMap)
+    val cannotLinkComponentMap = calculateComponentLevelCannotLinks(cannotLinkConstraints, elemToComponentIdMap)
 
 
-    (filteredData, vectorComponentMap, elementsByComponents, cannotLinkComponentMap, vertexIdToVectorMap)
+    (filteredData, elemToComponentIdMap, elementsByComponents, cannotLinkComponentMap)
   }
 
 
@@ -47,7 +47,7 @@ object PCKMeansInitializator extends Logging {
     normalizedContraintVectorSet
   }
 
-  def filterContrainedElementsFromData (data : RDD[VectorWithNorm], mustLinkConstraintElements: Set[VectorWithNorm], cannotLinkConstraintElements: Set[VectorWithNorm]): RDD[VectorWithNorm] = {
+  def filterConstrainedElementsFromData (data : RDD[VectorWithNorm], mustLinkConstraintElements: Set[VectorWithNorm], cannotLinkConstraintElements: Set[VectorWithNorm]): RDD[VectorWithNorm] = {
 
     val filteredData: RDD[VectorWithNorm] = data.filter( vector => ! (cannotLinkConstraintElements.contains(vector) || mustLinkConstraintElements.contains(vector)))
     filteredData
@@ -113,7 +113,7 @@ object PCKMeansInitializator extends Logging {
     cannotLinkComponentMap
   }
 
-  def calculateCenters(k: Int, runs: Int, filteredData : RDD[VectorWithNorm], vectorComponentMap: Map[VectorWithNorm, Long], cannotLinkComponentMap: Map[Long, Set[Long]], vertexIdToVectorMap: Map[Long, VectorWithNorm]) : Map[ClusterIndex, ClusterCenter] = {
+  def calculateCenters(k: Int, runs: Int, filteredData : RDD[VectorWithNorm], vectorComponentMap: Map[VectorWithNorm, Long], cannotLinkComponentMap: Map[Long, Set[Long]]) : Map[ClusterIndex, ClusterCenter] = {
 
     val mustLinkComponents = vectorComponentMap.toSeq.groupBy( _._2 ).toSeq.filter( elem => elem._2.size > 1)
 
@@ -136,7 +136,7 @@ object PCKMeansInitializator extends Logging {
 
 
     val mustLinkComponentCount: PartitionID = biggestKComponentCenter.length
-    val randomCenters: Array[Vector] = filteredData.takeSample(withReplacement = false, k - mustLinkComponentCount).map(_.vector)
+    val randomCenters: Array[Vector] = filteredData.takeSample(withReplacement = false, num = k - mustLinkComponentCount).map(_.vector)
 
     val centers : Array[VectorWithNorm] = new Array(k)
 
@@ -158,9 +158,9 @@ object PCKMeansInitializator extends Logging {
   def init(k: Int, runs: Int, data : RDD[Vector], mustLinkConstraints: Set[Constraint], cannotLinkConstraints: Set[Constraint]):
             (RDD[VectorWithNorm], Map[VectorWithNorm, VertexId], Map[ComponentId, Seq[VectorWithNorm]], Map[VertexId, Set[VertexId]], Map[ClusterIndex, ClusterCenter]) = {
 
-    val (filteredData, vectorComponentMap, elementsByComponents, cannotLinkComponentMap, vertexIdToVectorMap) = preProcessData(data, mustLinkConstraints, cannotLinkConstraints)
+    val (filteredData, vectorComponentMap, elementsByComponents, cannotLinkComponentMap) = preProcessData(data, mustLinkConstraints, cannotLinkConstraints)
 
-    val centers: Map[ClusterIndex, ClusterCenter] = calculateCenters(k, runs, filteredData, vectorComponentMap, cannotLinkComponentMap, vertexIdToVectorMap)
+    val centers: Map[ClusterIndex, ClusterCenter] = calculateCenters(k, runs, filteredData, vectorComponentMap, cannotLinkComponentMap)
     (filteredData, vectorComponentMap, elementsByComponents, cannotLinkComponentMap, centers)
   }
 

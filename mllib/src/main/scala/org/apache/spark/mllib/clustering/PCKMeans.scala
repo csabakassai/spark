@@ -2,7 +2,7 @@ package org.apache.spark.mllib.clustering
 
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.mllib.clustering.PCKMeans.ClusterCenter
-import org.apache.spark.mllib.linalg.{BLAS, Vector}
+import org.apache.spark.mllib.linalg.{Vectors, BLAS, Vector}
 import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{Accumulator, SparkContext}
@@ -140,22 +140,20 @@ object PCKMeans {
 
     val currentCenters = broadcastedCenters.value
 
-    val elementsWithClosestCenter = elements.map(element => {
-                                                              val (closestIndex, _, cost) = findClosest(currentCenters, element)
-                                                              costAccumulator.add(cost)
-                                                              (element, closestIndex)}
-    ).toSeq
+    val dims: Int = currentCenters.values.head.vector.size
+    val k = currentCenters.keys.size
+    val sums: Array[Vector] = Array.fill(k)(Vectors.zeros(dims))
+    val counts: Array[Long] = Array.fill(k)(0l)
 
-    val elementByClosesCenter: Map[ClusterIndex, Seq[(VectorWithNorm, ClusterIndex)]] = elementsWithClosestCenter.groupBy( _._2 )
+    elements.foreach( elem => {
+      val (closestIndex, _, cost) = findClosest(currentCenters, elem)
+      costAccumulator += cost
+      val currentSum = sums(closestIndex)
+      BLAS.axpy(1.0, elem.vector, currentSum)
+      counts(closestIndex) = counts(closestIndex) + 1
 
-    val elementsAndCostsByCenterIndex: Map[ClusterIndex, Seq[Vector]] = elementByClosesCenter.mapValues( elementWithClosestCenterAndCost => elementWithClosestCenterAndCost.map( _._1.vector ))
-
-    val sumAndCountByCenterIndex: Map[ClusterIndex, (Vector, Long)] = elementsAndCostsByCenterIndex.mapValues { elementsWithCosts =>
-
-      val vectorSum: Vector = elementsWithCosts.reduce(KMeansUtil.addVectors)
-      (vectorSum, elementsWithCosts.size.toLong)
-    }
-    sumAndCountByCenterIndex.toSeq.iterator
+    })
+    currentCenters.map(entry => (entry._1, (sums(entry._1), counts(entry._1)))).iterator
 
   }
 

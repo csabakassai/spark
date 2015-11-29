@@ -57,7 +57,7 @@ class PCKMeansInitializatorSuite extends SparkFunSuite with MLlibTestSparkContex
     val cannotLinks = PCKMeansInitializator.collectVectorsFromConstraintsAndNormalize( cannotLinkConstraints )
 
     val data = sc.parallelize(dataList).map(new VectorWithNorm(_))
-    val filtered = PCKMeansInitializator.filterContrainedElementsFromData( data, cannotLinks, mustLinks )
+    val filtered = PCKMeansInitializator.filterConstrainedElementsFromData( data, cannotLinks, mustLinks )
     val filteredData = filtered.collect()
 
     assert(filteredData.length == 3)

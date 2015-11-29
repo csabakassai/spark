@@ -1,8 +1,9 @@
 package org.apache.spark.mllib.clustering
 
 import java.io.File
-import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
+import java.text.SimpleDateFormat
+import java.util.Date
+
 import java.util.concurrent.TimeUnit
 
 import com.google.common.base.Stopwatch
@@ -159,7 +160,7 @@ class PCKMeansSuite extends SparkFunSuite with MLlibTestSparkContext {
 
   def generateConstraints(source: RDD[((Vector, PartitionIndex, ClusterIndex), (Vector, PartitionIndex, ClusterIndex))], elemNumber: Int, percentage: Double): Set[Constraint] = {
 
-    val constaints: Set[Constraint] = source.takeSample(withReplacement = false, (elemNumber * percentage/100).toInt ).map( elem => Constraint((elem._1._1, elem._2._1), 1)).toSet
+    val constaints: Set[Constraint] = source.takeSample(withReplacement = false, num = (elemNumber * percentage/100).toInt ).map( elem => Constraint((elem._1._1, elem._2._1), 1)).toSet
     constaints
   }
 
@@ -173,8 +174,8 @@ class PCKMeansSuite extends SparkFunSuite with MLlibTestSparkContext {
     val elementsWithPartitions: RDD[(Vector, Int)] = sc.parallelize(data).persist()
     val elementsRDD: RDD[Vector] = elementsWithPartitions.keys.persist()
 
-    val format: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-hhmm")
-    val experimentPath = resultFilePath + experimentName + "_" + LocalDateTime.now().format(format) + "/"
+    val format: SimpleDateFormat = new SimpleDateFormat("yyyyMMdd-hhmm")
+    val experimentPath = resultFilePath + experimentName + "_" + format.format(new Date()) + "/"
 
     new File(experimentPath).mkdir()
 
