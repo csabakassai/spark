@@ -7,8 +7,8 @@ import org.apache.spark.mllib.linalg.{Vector, Vectors}
 import org.apache.spark.rdd.RDD
 
 /**
- * Created by cskassai on 04/11/15.
- */
+*  Created by cskassai on 04/11/15.
+*/
 class PCKMeansInitializatorSuite extends SparkFunSuite with MLlibTestSparkContext {
 
   val dataList = List(  Vectors.dense(3, 1),
@@ -49,7 +49,7 @@ class PCKMeansInitializatorSuite extends SparkFunSuite with MLlibTestSparkContex
 
   test( "collectVectorsFromConstraints empty input" ) {
     val constraintVectors = PCKMeansInitializator.collectVectorsFromConstraintsAndNormalize(Set.empty)
-    assert(constraintVectors.size == 0)
+    assert(constraintVectors.isEmpty)
   }
 
   test( "filter constrained elements" ) {
@@ -60,7 +60,7 @@ class PCKMeansInitializatorSuite extends SparkFunSuite with MLlibTestSparkContex
     val filtered = PCKMeansInitializator.filterContrainedElementsFromData( data, cannotLinks, mustLinks )
     val filteredData = filtered.collect()
 
-    assert(filteredData.size == 3)
+    assert(filteredData.length == 3)
     assert(filteredData.contains(new VectorWithNorm(Vectors.dense(3, 1))))
     assert(filteredData.contains(new VectorWithNorm(Vectors.dense(5, 3))))
     assert(filteredData.contains(new VectorWithNorm(Vectors.dense(2, 4))))
@@ -76,7 +76,7 @@ class PCKMeansInitializatorSuite extends SparkFunSuite with MLlibTestSparkContex
     assert(vertexIdToVectorMap.size == 12)
 
 
-    val components = PCKMeansInitializator.calculateMustLinkComponents( mustLinkConstraints, vectorVertexMap, vertexIdToVectorMap )(sc)
+    val (components, elementsByComponents) = PCKMeansInitializator.calculateMustLinkComponents( mustLinkConstraints, vectorVertexMap, vertexIdToVectorMap )(sc)
 
     components.foreach(println)
 
@@ -88,13 +88,15 @@ class PCKMeansInitializatorSuite extends SparkFunSuite with MLlibTestSparkContex
                           Seq(VectorWithNorm.fromCoordinates(9, 5)),
                           Seq(VectorWithNorm.fromCoordinates(6, 11))),
                     {components.get(_).get})
+
+    assertGrouping( elementsByComponents.values.toSeq, {components.get(_).get})
   }
 
 
   test(" full init ") {
-    val (_, _, _, centers) = PCKMeansInitializator.init(5, 1, sc.parallelize(dataList), mustLinkConstraints, cannotLinkConstraints)
+    val (_, _, _,_,  centers) = PCKMeansInitializator.init(5, 1, sc.parallelize(dataList), mustLinkConstraints, cannotLinkConstraints)
 
-    centers.foreach( vectorWithNorm => println(vectorWithNorm.vector))
+    centers.foreach( vectorWithNorm => println(s"Index: ${vectorWithNorm._1}; center ${vectorWithNorm._2.vector}"))
   }
   
   
