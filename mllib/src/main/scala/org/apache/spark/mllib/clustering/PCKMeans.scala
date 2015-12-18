@@ -1,12 +1,19 @@
 package org.apache.spark.mllib.clustering
 
+
+import com.google.common.base.Stopwatch
+import org.apache.commons.lang.time.StopWatch
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.mllib.clustering.PCKMeans.ClusterCenter
+import org.apache.spark.mllib.clustering.PCKMeansInitializator._
 import org.apache.spark.mllib.linalg.{Vectors, BLAS, Vector}
 import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{Accumulator, SparkContext}
+import org.github.jamm.MemoryMeter
+import org.slf4j.{MarkerFactory, Logger, LoggerFactory}
 
+import scala.collection.mutable
 import scala.collection.mutable.{Map => MutableMap}
 
 /**
@@ -18,6 +25,9 @@ class PCKMeans extends KMeans {
 
   type ComponentId = Long
 
+  private val mlog: Logger = LoggerFactory.getLogger("pckmeans.memory")
+  private val TIME_LOG: Logger = LoggerFactory.getLogger("pckmeans.time")
+
   def setPunishmentFactor(punishmentFactor: Double): PCKMeans = {
     this.punishmentFactor = punishmentFactor
     this
@@ -26,17 +36,29 @@ class PCKMeans extends KMeans {
 
   var punishmentFactor : Double = 2
 
+  var mustLinkSize = 0l
+  var cannotLinkSize = 0l
+  var mustlinkComponentSize = 0l
+
+  var tempmem = 0l
+
 
   def run(data: RDD[Vector], mustLinkConstraints: Set[Constraint], cannotLinkConstraints: Set[Constraint]): KMeansModel = {
 
+    TIME_LOG.info("==================================================")
+    mustLinkSize = mustLinkConstraints.size
+    cannotLinkSize = cannotLinkConstraints.size
 
-
+    val watch: Stopwatch = new Stopwatch()
+    watch.start()
     val (filteredAndNormalizedData, vectorComponentIdMap, elementsByComponents, cannotLinkComponentMap, centers) = PCKMeansInitializator.init(k, runs, data, mustLinkConstraints, cannotLinkConstraints)
 
+
+    mustlinkComponentSize = elementsByComponents.keys.size
     filteredAndNormalizedData.persist()
 
     logInfo(s"""Initial centers: ${centers.mkString("; ")}""")
-
+    TIME_LOG.info(s"Initialization: ${watch.stop()}")
     val model = runAlgorithm(filteredAndNormalizedData, vectorComponentIdMap, elementsByComponents, cannotLinkComponentMap, centers)
 
     filteredAndNormalizedData.unpersist()
@@ -51,6 +73,7 @@ class PCKMeans extends KMeans {
                            cannotLinkComponentMap: Map[Long, Set[Long]],
                            initialCenters: Map[ClusterIndex, ClusterCenter]): KMeansModel = {
 
+
     val sc: SparkContext = filteredAndNormalizedData.context
 
     var iteration = 0
@@ -58,6 +81,7 @@ class PCKMeans extends KMeans {
     var centersChanged = true
 
     val constrainedElementClusters: MutableMap[VectorWithNorm, ClusterIndex] = MutableMap.empty
+    val alma: MutableMap[ClusterIndex, Set[VectorWithNorm]] = MutableMap.empty
     
     while ( iteration < maxIterations && centersChanged ) {
 
@@ -66,12 +90,22 @@ class PCKMeans extends KMeans {
       val broadcastedCenters = sc.broadcast(currentCenters)
       val costAccumulator = sc.accumulator(0.0)
 
+      val watch: Stopwatch = new Stopwatch()
+
+      watch.start();
       val normalSumAndCountByCenterPerPartition: RDD[(ClusterIndex, (Vector, Long))] = filteredAndNormalizedData.mapPartitions ( PCKMeans.calculatePartitionCentersAndContribution(_, broadcastedCenters, costAccumulator) )
       logTrace(s"Normal sum and count per partition: ${normalSumAndCountByCenterPerPartition.collect().mkString("; ")}")
+      TIME_LOG.info(s"NORMAL: ${watch}")
 
-      val constrainedSumAndCountByCenter : Seq[(ClusterIndex, (Vector, Long))] = PCKMeans.calculateConstrainedCentersAndContribution(currentCenters, costAccumulator, vectorComponentIdMap,elementsByComponents, cannotLinkComponentMap,constrainedElementClusters, punishmentFactor )
+      watch.reset().start()
+      val (constrainedSumAndCountByCenter, actualTemp) : (Seq[(ClusterIndex, (Vector, Long))], Long) = PCKMeans.calculateConstrainedCentersAndContribution(currentCenters, costAccumulator, vectorComponentIdMap,elementsByComponents, cannotLinkComponentMap,constrainedElementClusters, alma, punishmentFactor )
       logTrace(s"Constained sum and count per partition: ${constrainedSumAndCountByCenter.mkString("; ")}")
+      TIME_LOG.info(s"CONSTRAINED: ${watch}")
 
+//      if(actualTemp > tempmem) {
+//        tempmem = actualTemp
+//      }
+      watch.reset().start()
       val sumAndCountByCenterPerPartition = normalSumAndCountByCenterPerPartition ++ sc.parallelize(constrainedSumAndCountByCenter)
 
       val contributionsByCenter: Map[ClusterIndex, (Vector, Long)] = sumAndCountByCenterPerPartition.reduceByKey((elem1, elem2) => {
@@ -97,10 +131,23 @@ class PCKMeans extends KMeans {
 
       currentCenters = newCenters.toSeq.toMap
       iteration += 1
+      TIME_LOG.info(s"SUM: ${watch}")
       
     }
 
-    logInfo(s"Clustering finished after $iteration iteration")
+    logWarning(s"Clustering finished after $iteration iteration")
+    
+    
+
+//    val meter = new MemoryMeter();
+//    val sumData = (vectorComponentIdMap, elementsByComponents, cannotLinkComponentMap, constrainedElementClusters)
+//    val deep: Long = meter.measureDeep(sumData)
+
+
+    if(centersChanged) {
+      logWarning("The clustering stopped because of the maxiteration constraint!")
+    }
+//    mlog.warn(s"$mustLinkSize;$cannotLinkSize;$mustlinkComponentSize;${vectorComponentIdMap.keys.size};$tempmem;${meter.measureDeep(vectorComponentIdMap)};${meter.measureDeep(elementsByComponents)};${meter.measureDeep(cannotLinkComponentMap)};${meter.measureDeep(constrainedElementClusters)};$deep")
 
     new KMeansModel(currentCenters.values.map(_.vector).toArray)
   }
@@ -115,6 +162,7 @@ class PCKMeansContext {
 
 object PCKMeans {
 
+  private val TIME_LOG: Logger = LoggerFactory.getLogger("pckmeans.time")
   type ClusterCenter = VectorWithNorm
 
   type ComponentId = Long
@@ -188,16 +236,22 @@ object PCKMeans {
                                                  elementsByComponents: Map[ComponentId, Seq[VectorWithNorm]],
                                                  cannotLinkComponentMap: Map[ComponentId, Set[ComponentId]],
                                                  constrainedElementClusters: MutableMap[VectorWithNorm, ClusterIndex],
-                                                 punishmentFactor : Double): Seq[( ClusterIndex, (Vector, Long))] = {
+                                                 alma: MutableMap[ClusterIndex, Set[VectorWithNorm]],
+                                                 punishmentFactor : Double): (Seq[( ClusterIndex, (Vector, Long))], Long) = {
 
 
-    
-    
+
+    val watch: Stopwatch = new Stopwatch()
+    watch.start()
     val elementsWithClosestCenter: Seq[(VectorWithNorm, ClusterIndex)] = componentByVector.map( element => {
-      val (cluster, cost) = findClosestConstrained(currentCenters, element._1, componentByVector, elementsByComponents, cannotLinkComponentMap, constrainedElementClusters, punishmentFactor)
+      val (cluster, cost) = findClosestConstrained(currentCenters, element._1, componentByVector, elementsByComponents, cannotLinkComponentMap, constrainedElementClusters, alma, punishmentFactor)
       costAccumulator.add(cost)
       (element._1, cluster)
     }).toSeq
+
+    TIME_LOG.info(s"closest: ${watch}")
+
+    watch.reset().start();;
 
     val elementByClosesCenter: Map[ClusterIndex, Seq[(VectorWithNorm, ClusterIndex)]] = elementsWithClosestCenter.groupBy( _._2 )
 
@@ -209,8 +263,15 @@ object PCKMeans {
       (vectorSum, elementsWithCosts.size.toLong)
     }
 
-    
-    sumAndCountByCenterIndex.toSeq
+    val toSeq: Seq[(ClusterIndex, (Vector, ComponentId))] = sumAndCountByCenterIndex.toSeq
+
+    TIME_LOG.info(s"else: ${watch}")
+
+
+//    val memoryMeter = new MemoryMeter()
+//    val actualTemp: ComponentId = memoryMeter.measureDeep((toSeq, sumAndCountByCenterIndex, elementsAndCostsByCenterIndex, elementByClosesCenter, elementByClosesCenter))
+
+    (toSeq, 0)
 
   }
 
@@ -220,12 +281,12 @@ object PCKMeans {
                              elementsByComponents: Map[ComponentId, Seq[VectorWithNorm]],
                              cannotLinkComponentMap: Map[ComponentId, Set[ComponentId]],
                              currentConstrainedClusters: MutableMap[VectorWithNorm, ClusterIndex],
+                             currentElementsByClusterCenter: MutableMap[ClusterIndex, Set[VectorWithNorm]],
                              punishmentFactor : Double): ( ClusterIndex, Double ) = {
 
     var bestDistance = Double.PositiveInfinity
     var bestIndex: Int = -1
     var bestCenter: ClusterCenter = null
-    val currentElementsByClusterCenter: Map[ClusterIndex, Seq[VectorWithNorm]] = currentConstrainedClusters.groupBy(_._2).mapValues( _.keys.toSeq)
 
     for( (index, center) <- centers ) {
       // Since `\|a - b\| \geq |\|a\| - \|b\||`, we can use this lower bound to avoid unnecessary
@@ -235,20 +296,17 @@ object PCKMeans {
       if (lowerBoundOfSqDist < bestDistance) {
         val distance: Double = KMeansUtil.fastSquaredDistance(center, point)
 
-        val elementsInTheSameCluster = currentElementsByClusterCenter.getOrElse(index, Seq.empty)
+        val emptySet: Set[VectorWithNorm] = Set.empty
 
+        val elementsInTheSameCluster = currentElementsByClusterCenter.getOrElse(index, emptySet)
         val currentComponentId = componentByVector.get(point).get
 
         val elementsInTheSameComponent = elementsByComponents.get(currentComponentId).get
         val cannotLinkViolations = calculateCannotLinkPunishmentFactor( point, componentByVector, cannotLinkComponentMap, elementsInTheSameCluster )
         val mustLinkViolations = calculateMustLinkPunishmentFactor(index, point, componentByVector, currentConstrainedClusters, elementsInTheSameComponent )
 
-
-        import scala.math.pow
-
         val violatingElemNumber = cannotLinkViolations + mustLinkViolations
-        val punishment: Double = pow(punishmentFactor, violatingElemNumber)
-        val calculatedDistance = distance * punishment * punishment
+        val calculatedDistance = distance + violatingElemNumber * punishmentFactor
 
         if (calculatedDistance < bestDistance) {
           bestDistance = calculatedDistance
@@ -258,7 +316,19 @@ object PCKMeans {
       }
     }
 
+    val oldCluster: ClusterIndex = currentConstrainedClusters.getOrElse(point, -1)
+
+    var e: Set[VectorWithNorm] = currentElementsByClusterCenter.getOrElse(oldCluster, Set.empty)
+    e -= point
+    if(oldCluster > 0) {
+      currentElementsByClusterCenter += (oldCluster -> e)
+    }
+
+    var newSet: Set[VectorWithNorm] = currentElementsByClusterCenter.getOrElse(bestIndex, Set.empty)
+    newSet += (point)
+    currentElementsByClusterCenter += (bestIndex -> newSet)
     currentConstrainedClusters += (point -> bestIndex)
+
     
     (bestIndex, bestDistance)
   }
@@ -266,7 +336,7 @@ object PCKMeans {
   def calculateCannotLinkPunishmentFactor( element: VectorWithNorm,
                                            componentByVector:  Map[VectorWithNorm, ComponentId],
                                            cannotLinkComponentMap: Map[ComponentId, Set[ComponentId]],
-                                           elementsInTheSameCluster: Seq[VectorWithNorm] ) : Int = {
+                                           elementsInTheSameCluster: Set[VectorWithNorm] ) : Int = {
 
     val elementComponentId = componentByVector.get(element).get
 

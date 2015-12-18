@@ -96,6 +96,8 @@ class PCKMeansInitializatorSuite extends SparkFunSuite with MLlibTestSparkContex
   test(" full init ") {
     val (_, _, _,_,  centers) = PCKMeansInitializator.init(5, 1, sc.parallelize(dataList), mustLinkConstraints, cannotLinkConstraints)
 
+
+
     centers.foreach( vectorWithNorm => println(s"Index: ${vectorWithNorm._1}; center ${vectorWithNorm._2.vector}"))
   }
   

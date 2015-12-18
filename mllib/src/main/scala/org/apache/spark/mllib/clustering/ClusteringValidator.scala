@@ -66,7 +66,7 @@ object ClusteringValidator {
     val purityAndElemNumberByCluster: Seq[(ClusterIndex, (Double, Long))] = contingencyTableByCluster.mapValues( elem => {
       val max = elem.max
       val sum = elem.sum
-      val purity = max/sum.toDouble
+      val purity = max/(sum.toDouble)
       (purity, sum)
     }).toSeq
 

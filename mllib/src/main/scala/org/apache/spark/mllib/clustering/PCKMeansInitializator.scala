@@ -5,6 +5,7 @@ import org.apache.spark.mllib.clustering.PCKMeans.{ClusterCenter, ClusterIndex}
 import org.apache.spark.mllib.linalg.{BLAS, Vector}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{Logging, SparkContext}
+import org.github.jamm.MemoryMeter
 
 /**
 *  Created by cskassai on 03/11/15.
@@ -161,6 +162,8 @@ object PCKMeansInitializator extends Logging {
     val (filteredData, vectorComponentMap, elementsByComponents, cannotLinkComponentMap) = preProcessData(data, mustLinkConstraints, cannotLinkConstraints)
 
     val centers: Map[ClusterIndex, ClusterCenter] = calculateCenters(k, runs, filteredData, vectorComponentMap, cannotLinkComponentMap)
+
+
     (filteredData, vectorComponentMap, elementsByComponents, cannotLinkComponentMap, centers)
   }
 

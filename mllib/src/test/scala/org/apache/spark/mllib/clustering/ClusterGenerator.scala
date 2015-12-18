@@ -45,6 +45,22 @@ object ClusterGenerator {
     transformed
   }
 
+//  def generateOneElem(descriptor: EllipsoidClusterDescriptor): Vector = {
+//    val u: Double = Random.nextDouble()
+//
+//    val randomVector: Seq[Double] = Stream.continually(Random.nextGaussian()).take(descriptor.center.size).toSeq
+//
+//    val denominator: Double = Math.sqrt(randomVector.map( e => e * e ).reduce( _ + _ ))
+//
+//    val ground: Seq[Double] = randomVector.map( _ * u / denominator)
+//
+//    val transformed: Vector = Vectors.dense(ground.toArray.zip(descriptor.extent.toArray).map( elem => elem._1 * elem._2 ))
+//
+//    BLAS.axpy(1, descriptor.center, transformed)
+//
+//    transformed
+//  }
+
   def main (args: Array[String]){
 
 
